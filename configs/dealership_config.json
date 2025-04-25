@@ -1,0 +1,20 @@
+[
+  {
+    "dealer_id": "dealer123",
+    "name": "Downtown Toyota",
+    "timezone": "America/Chicago",
+    "credentials": {
+      "username": "PLACEHOLDER_USERNAME",
+      "password": "PLACEHOLDER_PASSWORD",
+      "auth_email": "auth_email@example.com"
+    },
+    "schedules": {
+      "morning_run": "07:00",
+      "afternoon_run": "14:00"
+    },
+    "feature_mapping_overrides": {
+      "Custom Feature Name": ["checkbox_name_1", "checkbox_name_2"]
+    },
+    "report_recipients": ["dealership_manager@example.com"]
+  }
+]

@@ -1,0 +1,23 @@
+{
+  "nova_act": {
+    "timeout": 60,
+    "retry_attempts": 3,
+    "headless": true
+  },
+  "feature_mapping": {
+    "confidence_threshold": 90,
+    "similarity_algorithm": "fuzzywuzzy.ratio"
+  },
+  "processing": {
+    "max_vehicles_per_batch": 100,
+    "session_timeout": 25
+  },
+  "reporting": {
+    "email_recipients": ["manager@example.com"],
+    "log_level": "INFO",
+    "store_logs_days": 30
+  },
+  "alerts": {
+    "email_recipients": ["alerts@example.com"]
+  }
+}

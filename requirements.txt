@@ -1,0 +1,18 @@
+# Core dependencies
+nova-act==1.0.0  # Update with actual version
+fuzzywuzzy==0.18.0
+python-Levenshtein==0.12.2
+apscheduler==3.10.1
+python-dotenv==1.0.0
+aiosmtplib==2.0.2
+pydantic==2.3.0
+asyncio==3.4.3
+aiohttp==3.8.5
+aioimaplib==1.0.1
+
+# Development dependencies
+pytest==7.4.0
+pytest-asyncio==0.21.1
+black==23.7.0
+flake8==6.1.0
+mypy==1.5.1
