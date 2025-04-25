@@ -1,176 +1,398 @@
 """
 Authentication Module for vAuto Feature Verification System.
 
-Handles login flow, 2FA, and session management.
+Handles:
+- Secure credential management
+- vAuto login and session management
+- Session validation and renewal
 """
 
 import logging
-import re
+import os
+from datetime import datetime, timedelta
 import asyncio
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-class AuthenticationError(Exception):
-    """Exception raised for authentication errors."""
-    pass
-
-class EmailClient:
-    """
-    Mock email client for retrieving 2FA codes.
-    Will be replaced with actual email client implementation.
-    """
-    
-    def __init__(self, username, password, server):
-        self.username = username
-        self.password = password
-        self.server = server
-    
-    async def search_emails(self, from_address, subject, newer_than_minutes):
-        """
-        Search for emails matching criteria.
-        
-        Args:
-            from_address (str): Sender email address
-            subject (str): Email subject
-            newer_than_minutes (int): Email age in minutes
-            
-        Returns:
-            list: List of matching emails
-        """
-        # This is a mock implementation
-        logger.info(f"Searching for emails from {from_address} with subject '{subject}'")
-        return ["mock_email_id"]
-    
-    async def get_email_body(self, email_id):
-        """
-        Get email body content.
-        
-        Args:
-            email_id (str): Email ID
-            
-        Returns:
-            str: Email body
-        """
-        # This is a mock implementation
-        logger.info(f"Retrieving email body for {email_id}")
-        return "Your verification code is: 123456"
-
 class AuthenticationModule:
     """
-    Authentication module for vAuto.
-    Handles login, 2FA, and session management.
+    Module for handling vAuto authentication.
     """
     
-    @staticmethod
-    async def authenticate(browser, config):
+    def __init__(self, nova_engine, config):
         """
-        Authenticate to vAuto with username, password, and 2FA.
+        Initialize the authentication module.
         
         Args:
-            browser (object): Browser instance
-            config (dict): Authentication configuration
+            nova_engine (NovaActEngine): Nova Act Engine instance
+            config (dict): System configuration
+        """
+        self.nova_engine = nova_engine
+        self.config = config
+        self.session_valid_until = None
+        
+        # Get credentials from environment variables
+        self.credentials = {
+            "username": os.getenv("VAUTO_USERNAME"),
+            "password": os.getenv("VAUTO_PASSWORD")
+        }
+        
+        if not self.credentials["username"] or not self.credentials["password"]:
+            logger.error("vAuto credentials not found in environment variables")
+            raise ValueError("vAuto credentials are required (VAUTO_USERNAME and VAUTO_PASSWORD)")
+        
+        logger.info("Authentication module initialized")
+    
+    async def login(self, dealership_id=None):
+        """
+        Log in to vAuto.
+        
+        Args:
+            dealership_id (str, optional): Dealership ID to select after login
             
         Returns:
-            bool: True if authentication successful
-            
-        Raises:
-            AuthenticationError: If authentication fails
+            bool: True if login successful, False otherwise
         """
-        logger.info("Starting authentication process")
+        logger.info("Logging in to vAuto")
         
         try:
-            # These are placeholder commands for Nova Act
-            # In actual implementation, these would be replaced with real Nova Act commands
+            result = await self.nova_engine.execute_action(
+                lambda browser: self._login_action(browser, dealership_id)
+            )
             
+            if result:
+                # Set session expiration (default to 4 hours)
+                self.session_valid_until = datetime.now() + timedelta(hours=4)
+                logger.info("Successfully logged in to vAuto")
+            else:
+                logger.error("Failed to log in to vAuto")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error logging in to vAuto: {str(e)}")
+            return False
+    
+    async def _login_action(self, browser, dealership_id):
+        """
+        Internal action to perform login.
+        
+        Args:
+            browser: Browser instance
+            dealership_id (str, optional): Dealership ID to select after login
+            
+        Returns:
+            bool: True if login successful, False otherwise
+        """
+        try:
             # Navigate to login page
-            logger.info("Navigating to login page")
-            # await browser.navigate("https://app.vauto.com/login")
+            await self.nova_engine.navigate_to("https://www.vauto.com/login")
             
-            # Enter username
-            logger.info("Entering username")
-            # await browser.run_command("enter the username in the username field", 
-            #                     {"username": config["credentials"]["username"]})
-            # await browser.run_command("click on the Next button")
+            # Wait for the login form to load
+            username_field = await self.nova_engine.wait_for_presence(By.ID, "username")
+            if not username_field:
+                logger.error("Login form not found")
+                return False
             
-            # Enter password
-            logger.info("Entering password")
-            # await browser.run_command("enter the password in the password field",
-            #                     {"password": config["credentials"]["password"]})
-            # await browser.run_command("click on the Sign In button")
+            # Enter credentials
+            await self.nova_engine.fill_input(By.ID, "username", self.credentials["username"])
+            await self.nova_engine.fill_input(By.ID, "password", self.credentials["password"])
             
-            # Handle 2FA
-            logger.info("Handling 2FA")
-            otp_code = await AuthenticationModule.get_2fa_code(config)
-            # await browser.run_command("enter the verification code",
-            #                     {"code": otp_code})
-            # await browser.run_command("click on the Verify button")
+            # Click login button
+            await self.nova_engine.click_element(By.XPATH, "//button[@type='submit' or contains(@class, 'login')]")
             
-            # Verify successful login
-            logger.info("Verifying successful login")
-            # dashboard_loaded = await browser.run_command(
-            #     "check if the dashboard has loaded by looking for the Provision logo")
+            # Wait for login to complete
+            dashboard_selector = "//div[contains(@class, 'dashboard') or contains(@class, 'inventory')]"
+            dashboard = await self.nova_engine.wait_for_presence(By.XPATH, dashboard_selector)
             
-            # if not dashboard_loaded:
-            #     error_message = await browser.run_command(
-            #         "check if there's an error message and return its text")
-            #     raise AuthenticationError(f"Failed to authenticate: {error_message}")
+            if not dashboard:
+                # Check for error messages
+                error_message = await self._check_login_errors(browser)
+                if error_message:
+                    logger.error(f"Login failed: {error_message}")
+                return False
             
-            logger.info("Authentication successful")
+            # Select dealership if specified
+            if dealership_id:
+                success = await self._select_dealership(dealership_id)
+                return success
+            
             return True
             
         except Exception as e:
-            logger.error(f"Authentication failed: {str(e)}")
-            raise AuthenticationError(f"Authentication failed: {str(e)}")
+            logger.error(f"Login action failed: {str(e)}")
+            # Take a screenshot for debugging
+            await self.nova_engine.take_screenshot("logs/login_failure.png")
+            return False
     
-    @staticmethod
-    async def get_2fa_code(config):
+    async def _check_login_errors(self, browser):
         """
-        Retrieve 2FA code from email.
+        Check for login error messages.
         
         Args:
-            config (dict): Email configuration
+            browser: Browser instance
             
         Returns:
-            str: OTP code
-            
-        Raises:
-            AuthenticationError: If OTP code cannot be retrieved
+            str: Error message if found, None otherwise
         """
-        logger.info("Retrieving 2FA code from email")
+        error_selectors = [
+            "//div[contains(@class, 'error')]",
+            "//span[contains(@class, 'error')]",
+            "//p[contains(@class, 'error')]",
+            "//div[contains(@class, 'alert')]"
+        ]
+        
+        for selector in error_selectors:
+            try:
+                elements = await self.nova_engine.find_elements(By.XPATH, selector)
+                for element in elements:
+                    text = await self.nova_engine.get_text(element)
+                    if text and len(text.strip()) > 0 and "error" in text.lower():
+                        return text.strip()
+            except:
+                continue
+        
+        return None
+    
+    async def _select_dealership(self, dealership_id):
+        """
+        Select a dealership after login.
+        
+        Args:
+            dealership_id (str): Dealership ID to select
+            
+        Returns:
+            bool: True if dealership selected successfully, False otherwise
+        """
+        logger.info(f"Selecting dealership: {dealership_id}")
         
         try:
-            # Connect to email
-            email_client = EmailClient(
-                username=config["email"]["username"],
-                password=config["email"]["password"],
-                server=config["email"]["server"]
+            # Check if dealership dropdown is present
+            dealer_dropdown = await self.nova_engine.find_element(
+                By.XPATH, 
+                "//div[contains(@class, 'dealerSelect') or contains(@class, 'dealer-select')]",
+                timeout=5
             )
             
-            # Search for recent OTP emails
-            emails = await email_client.search_emails(
-                from_address="noreply@vauto.com",
-                subject="Your verification code",
-                newer_than_minutes=5
-            )
+            if dealer_dropdown:
+                # Click the dropdown to show options
+                await self.nova_engine.click_element(dealer_dropdown)
+                
+                # Wait for dropdown options to appear
+                await asyncio.sleep(1)
+                
+                # Look for the specified dealership
+                dealership_option = await self.nova_engine.find_element(
+                    By.XPATH,
+                    f"//div[contains(text(), '{dealership_id}') or contains(@id, '{dealership_id}')]",
+                    timeout=5
+                )
+                
+                if dealership_option:
+                    await self.nova_engine.click_element(dealership_option)
+                    
+                    # Wait for the page to refresh with selected dealership
+                    await asyncio.sleep(2)
+                    
+                    logger.info(f"Successfully selected dealership: {dealership_id}")
+                    return True
+                else:
+                    logger.error(f"Dealership not found: {dealership_id}")
+                    return False
             
-            if not emails:
-                raise AuthenticationError("No verification code email found")
-            
-            # Get most recent email
-            latest_email = emails[0]
-            email_body = await email_client.get_email_body(latest_email)
-            
-            # Extract OTP code using regex
-            otp_match = re.search(r'verification code is: (\d{6})', email_body)
-            
-            if not otp_match:
-                raise AuthenticationError("Couldn't extract verification code from email")
-            
-            otp_code = otp_match.group(1)
-            logger.info("Successfully retrieved 2FA code")
-            
-            return otp_code
+            # If no dropdown is found, we may already be in the correct dealership
+            logger.info("No dealership selection needed")
+            return True
             
         except Exception as e:
-            logger.error(f"Failed to retrieve 2FA code: {str(e)}")
-            raise AuthenticationError(f"Failed to retrieve 2FA code: {str(e)}")
+            logger.error(f"Error selecting dealership: {str(e)}")
+            return False
+    
+    async def is_logged_in(self):
+        """
+        Check if the current session is logged in.
+        
+        Returns:
+            bool: True if logged in, False otherwise
+        """
+        if not self.session_valid_until or datetime.now() > self.session_valid_until:
+            return False
+        
+        try:
+            result = await self.nova_engine.execute_action(self._check_logged_in_action)
+            return result
+        except Exception as e:
+            logger.error(f"Error checking login status: {str(e)}")
+            return False
+    
+    async def _check_logged_in_action(self, browser):
+        """
+        Internal action to check if logged in.
+        
+        Args:
+            browser: Browser instance
+            
+        Returns:
+            bool: True if logged in, False otherwise
+        """
+        try:
+            # Check for login page
+            login_elements = await self.nova_engine.find_elements(
+                By.XPATH, 
+                "//*[@id='username' or contains(@class, 'login')]",
+                timeout=3
+            )
+            
+            if login_elements:
+                return False
+            
+            # Check for elements that indicate we're logged in
+            dashboard_elements = await self.nova_engine.find_elements(
+                By.XPATH,
+                "//div[contains(@class, 'dashboard') or contains(@class, 'inventory') or contains(@class, 'navbar')]",
+                timeout=3
+            )
+            
+            return len(dashboard_elements) > 0
+            
+        except Exception as e:
+            logger.warning(f"Check logged in action failed: {str(e)}")
+            return False
+    
+    async def ensure_logged_in(self, dealership_id=None):
+        """
+        Ensure the session is logged in, logging in if necessary.
+        
+        Args:
+            dealership_id (str, optional): Dealership ID to select if login is needed
+            
+        Returns:
+            bool: True if logged in, False otherwise
+        """
+        if await self.is_logged_in():
+            return True
+        
+        return await self.login(dealership_id)
+    
+    async def logout(self):
+        """
+        Log out from vAuto.
+        
+        Returns:
+            bool: True if logout successful, False otherwise
+        """
+        logger.info("Logging out from vAuto")
+        
+        try:
+            result = await self.nova_engine.execute_action(self._logout_action)
+            
+            if result:
+                self.session_valid_until = None
+                logger.info("Successfully logged out from vAuto")
+            else:
+                logger.error("Failed to log out from vAuto")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error logging out from vAuto: {str(e)}")
+            return False
+    
+    async def _logout_action(self, browser):
+        """
+        Internal action to perform logout.
+        
+        Args:
+            browser: Browser instance
+            
+        Returns:
+            bool: True if logout successful, False otherwise
+        """
+        try:
+            # Look for user menu or account dropdown
+            user_menu_selectors = [
+                "//div[contains(@class, 'user-menu')]",
+                "//button[contains(@class, 'user-menu')]",
+                "//div[contains(@class, 'account')]",
+                "//span[contains(@class, 'username')]",
+                "//div[contains(@class, 'profile')]"
+            ]
+            
+            user_menu = None
+            for selector in user_menu_selectors:
+                try:
+                    elements = await self.nova_engine.find_elements(By.XPATH, selector, timeout=1)
+                    if elements:
+                        user_menu = elements[0]
+                        break
+                except:
+                    continue
+            
+            if not user_menu:
+                logger.warning("User menu not found, trying logout directly")
+                
+                # Try direct logout link
+                logout_selectors = [
+                    "//a[contains(text(), 'Logout')]",
+                    "//a[contains(text(), 'Log out')]",
+                    "//button[contains(text(), 'Logout')]",
+                    "//button[contains(text(), 'Log out')]",
+                    "//a[contains(@href, 'logout')]"
+                ]
+                
+                for selector in logout_selectors:
+                    try:
+                        logout_button = await self.nova_engine.find_element(By.XPATH, selector, timeout=1)
+                        if logout_button:
+                            await self.nova_engine.click_element(logout_button)
+                            
+                            # Wait for login page to appear
+                            login_page = await self.nova_engine.wait_for_presence(By.ID, "username", timeout=5)
+                            return login_page is not None
+                    except:
+                        continue
+                
+                logger.error("Logout link not found")
+                return False
+            
+            # Click user menu to open dropdown
+            await self.nova_engine.click_element(user_menu)
+            
+            # Wait for dropdown to appear
+            await asyncio.sleep(1)
+            
+            # Look for logout option
+            logout_selectors = [
+                "//a[contains(text(), 'Logout')]",
+                "//a[contains(text(), 'Log out')]",
+                "//button[contains(text(), 'Logout')]",
+                "//button[contains(text(), 'Log out')]",
+                "//a[contains(@href, 'logout')]",
+                "//div[contains(text(), 'Logout')]"
+            ]
+            
+            for selector in logout_selectors:
+                try:
+                    logout_option = await self.nova_engine.find_element(By.XPATH, selector, timeout=1)
+                    if logout_option:
+                        await self.nova_engine.click_element(logout_option)
+                        
+                        # Wait for login page to appear
+                        login_page = await self.nova_engine.wait_for_presence(By.ID, "username", timeout=5)
+                        return login_page is not None
+                except:
+                    continue
+            
+            logger.error("Logout option not found in user menu")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Logout action failed: {str(e)}")
+            return False
